@@ -1,0 +1,119 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'bsef19m020@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Entity Validators
+    function isValidProduct(data) {
+      return data.name is string && data.name.size() >= 2 && data.name.size() <= 150 &&
+             data.price is number && data.price >= 0 &&
+             data.category is string && data.category.size() <= 60 &&
+             data.imageUrl is string && data.imageUrl.size() <= 1000 &&
+             data.stock is number && data.stock >= 0;
+    }
+
+    function isValidOrder(data) {
+      return data.userId is string && data.userId.size() <= 128 &&
+             data.customerEmail is string && data.customerEmail.size() <= 200 &&
+             data.customerName is string && data.customerName.size() <= 120 &&
+             data.subtotal is number && data.subtotal >= 0 &&
+             data.total is number && data.total >= 0 &&
+             data.status in ['pending', 'processing', 'shipped', 'delivered', 'cancelled'];
+    }
+
+    function isValidReview(data) {
+      return data.productId is string && data.productId.size() <= 128 &&
+             data.userId is string && data.userId.size() <= 128 &&
+             data.userName is string && data.userName.size() <= 100 &&
+             data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+             data.comment is string && data.comment.size() <= 1000;
+    }
+
+    function isValidSettings(data) {
+      return data.storeName is string && data.storeName.size() <= 100 &&
+             data.currency is string && data.currency.size() <= 10 &&
+             data.currencySymbol is string && data.currencySymbol.size() <= 5;
+    }
+
+    // Products catalog
+    match /products/{productId} {
+      allow read: if true;
+      allow create: if isValidId(productId) && isAdmin() && isValidProduct(incoming());
+      allow update: if isValidId(productId) && (
+        (isAdmin() && isValidProduct(incoming())) ||
+        // Allow stock decrement during checkout or review count update
+        (isSignedIn() && isValidProduct(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'rating', 'reviewCount']))
+      );
+      allow delete: if isValidId(productId) && isAdmin();
+    }
+
+    // Orders collection
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isValidId(orderId) && (
+        isAdmin() || (isSignedIn() && incoming().userId == request.auth.uid)
+      ) && isValidOrder(incoming());
+      allow update: if isValidId(orderId) && (
+        isAdmin() ||
+        // Customer can only cancel pending orders
+        (isSignedIn() && existing().userId == request.auth.uid &&
+         existing().status == 'pending' &&
+         incoming().status == 'cancelled' &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+      );
+      allow delete: if isValidId(orderId) && isAdmin();
+    }
+
+    // Reviews collection
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isValidId(reviewId) && isSignedIn() && incoming().userId == request.auth.uid && isValidReview(incoming());
+      allow update, delete: if isValidId(reviewId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+    }
+
+    // Store Settings
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isValidId(settingId) && isAdmin() && isValidSettings(incoming());
+    }
+
+    // Admins collection for role checking
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+  }
+}
